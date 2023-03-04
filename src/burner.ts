@@ -1,9 +1,10 @@
 import { NS } from '@ns';
 import { Display } from './lib/display';
-import { PQNode, PriorityQueue } from './lib/priority-queue';
+import { EventManager, EventType, ManagePodsEvent, UpdateServersEvent } from './lib/events';
 import { AutocompleteData, Command, Program } from './lib/program';
 import { bfsServers } from './lib/scan-servers';
 import { PodService } from './services/pod.service';
+import { ServerService } from './services/server.service';
 
 export async function main(ns: NS) {
   let debugMode = false;
@@ -25,28 +26,9 @@ export function autocomplete(data: AutocompleteData, args: string[]) {
   return program.autocomplete(data, args);
 }
 
-enum Event {
-  WAIT = 0,
-  MANAGE_PODS,
-  UPDATE_SERVERS,
-}
-
-class EventPQNode implements PQNode {
-  public event: Event;
-  public readyTime: number;
-
-  constructor(event: Event, readyTime: number) {
-    this.event = event;
-    this.readyTime = readyTime;
-  }
-
-  get priority(): number {
-    return this.readyTime;
-  }
-}
-
 class BurnerProgran extends Program {
   podService!: PodService;
+  serverService!: ServerService;
 
   constructor() {
     super();
@@ -68,46 +50,36 @@ class BurnerProgran extends Program {
     super.initialise(ns, display);
 
     this.podService = new PodService(ns, display);
+    this.serverService = new ServerService(ns, display);
   }
 
   async start() {
-    const eventQueue = new PriorityQueue<EventPQNode>();
-    let time = 0;
+    const eventQueue = new EventManager(this.ns, this.display);
 
     // Add base events
-    eventQueue.enqueue(new EventPQNode(Event.MANAGE_PODS, 0));
+    eventQueue.scheduleEvent(new ManagePodsEvent(), 0);
+    eventQueue.scheduleEvent(new UpdateServersEvent(), 0);
 
     // Execute events
     while (true) {
-      // Add a wait event  if the queue is empty;
-      if (eventQueue.isEmpty()) throw `No more event available!`;
-      this.display.debug('Event Queue: ', eventQueue);
-
-      const { event, readyTime } = eventQueue.dequeue();
-      const waitDuration = Math.max(readyTime - time, 1000);
-
-      // Waits for the event to be ready
-      this.display.debug(`Waiting for ${this.ns.tFormat(waitDuration)}`);
-      await this.ns.sleep(waitDuration);
-      time += waitDuration;
+      const event = await eventQueue.waitForNextEvent();
+      if (event == null) throw `No more event available!`;
 
       // Execute Event
       this.display.debug(`Executing event: ${event}`);
-      switch (event) {
-        case Event.WAIT:
-          break;
-        case Event.MANAGE_PODS:
+      switch (event.type) {
+        case EventType.MANAGE_PODS:
           {
             const waitDurationBeforeNextEvent = this.managePods();
             this.display.debug(`Waiting before next pod managment event: ${waitDurationBeforeNextEvent}`);
             if (waitDurationBeforeNextEvent >= 0.0) {
-              eventQueue.enqueue(new EventPQNode(Event.MANAGE_PODS, time + waitDurationBeforeNextEvent));
+              eventQueue.scheduleEvent(new ManagePodsEvent(), waitDurationBeforeNextEvent);
             }
           }
           break;
-          case Event.UPFATE_SERVERS:
-            if (this.takeOver) eventQueue.enqueue(new EventPQNode(Event.UPDATE_SERVERS, time + 60000));
-            break;
+        case EventType.UPDATE_SERVERS:
+          if (this.updateServers()) eventQueue.scheduleEvent(new UpdateServersEvent(), 60000);
+          break;
       }
     }
   }
@@ -131,10 +103,21 @@ class BurnerProgran extends Program {
     return -1;
   }
 
-  private takeOver(): boolean {
-    bfsServers(this.ns, this.ns.getHostname(), (server) => {
+  private updateServers(): boolean {
+    let shouldTakeOverAgain = false;
+    bfsServers(this.ns, this.ns.getHostname(), (hostname) => {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      let server = this.serverService.getServer(hostname)!;
+      this.serverService.takeOverServer(server);
 
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+      server = this.serverService.getServer(hostname)!;
+      this.serverService.updateScripts(server);
+
+      shouldTakeOverAgain = shouldTakeOverAgain && server.hasAdminRights;
     });
+
+    return shouldTakeOverAgain;
   }
 
   private estimateTimeToOwnMoney(amount: number) {

@@ -3,15 +3,12 @@ import { Display } from '@/lib/display';
 import { Service } from './service';
 
 export class ServerService extends Service {
-  private POD_NAME = 'pod';
-  private POD_PURCHASE_RAM = 2;
-
   constructor(ns: NS, display: Display) {
     super(ns, display);
   }
 
   public getServer(hostname: string) {
-    if (this.ns.serverExists(hostname)) return null;
+    if (!this.ns.serverExists(hostname)) return null;
     return this.ns.getServer(hostname);
   }
 
@@ -39,6 +36,12 @@ export class ServerService extends Service {
     if (openPorts < server.numOpenPortsRequired) return;
 
     this.ns.nuke(server.hostname);
-    this.display.print()
+    this.display.printSuccess(`Server taken over: ${server.hostname}`);
+  }
+
+  public updateScripts(server: Server) {
+    if (!server.hasAdminRights) return;
+
+    this.ns.scp(['weaken.js', 'grow.js', 'hack.js'], server.hostname, 'home');
   }
 }
